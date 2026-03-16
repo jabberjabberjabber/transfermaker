@@ -35,6 +35,8 @@ There is, actually. You need a pretty beefy computer to run this, and an even be
 
 Click the green '<> Code' button towards the top of the page and select 'Download zip'. Extract the zip file to a directory and double click on 'run-windows.bat'. It will take a little while to download the AI and the inference engine (they are multiples of gigabytes), but you only have to do that once. When it is done loading just follow the directions in the UI window.
 
+Don't forget to click on the star!
+
 ## Demo
 
 ![Step 1](./media/step01.png)
