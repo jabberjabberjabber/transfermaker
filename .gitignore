@@ -1,0 +1,8 @@
+/.claude
+resources/flux-2-klein-4b-Q4_0.gguf
+*.gguf
+*.exe
+*.safetensors
+/src/__pycache__
+src/api.py
+uv.lock
