@@ -2,6 +2,8 @@
 
 This application greatly simplifies the process of turning an image into a print.
 
+**Note: This is a work in progress! Use the issues for any bugs or feature request or discussions for any questions.**
+
 ## What Does This Do?
 
 1. You give it an image 
