@@ -72,3 +72,7 @@ Remove thin features.
 ![Step 9](./media/step09.png) 
 
 Open in vector image editor.
+
+## Acknowledgements
+
+- [KoboldCPP](https://github.com/LostRuins/koboldcpp) for local AI processing
