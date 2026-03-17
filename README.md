@@ -65,7 +65,7 @@ Upscaling and color clamping (restricts to only base colors you specified).
 
 Vectorize.
 
-![Step 8](./media/step08.png) 
+![Step 8](./media/step08a.png) 
 
 Remove thin features.
 
