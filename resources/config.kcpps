@@ -90,7 +90,7 @@
   "sdclip1": "https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
   "sdclip2": "",
   "sdphotomaker": "",
-  "sdupscaler": "",
+  "sdupscaler": "https://huggingface.co/Acly/Real-ESRGAN-GGUF/resolve/main/RealESRGAN-x4plus_anime-6B-F16.gguf",
   "sdflashattention": false,
   "sdoffloadcpu": true,
   "sdvaecpu": false,
