@@ -49,7 +49,7 @@ Choose the image.
 
 Specify size, feature thickness, colors, and requirements.
 
-![Step 4](./media/step04b.png)
+![Step 4](./media/step04.png)
 
 Wait a long time for generations.
 
@@ -72,7 +72,3 @@ Remove thin features.
 ![Step 9](./media/step09.png) 
 
 Open in vector image editor.
-
-![Step 10](./media/step10.png) 
-
-Make specific fixes and you are ready to print/cut.
