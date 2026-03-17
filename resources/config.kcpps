@@ -4,7 +4,7 @@
   "port": 5001,
   "port_param": 5001,
   "host": "",
-  "launch": true,
+  "launch": false,
   "config": null,
   "threads": -1,
   "usecuda": null,

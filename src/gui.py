@@ -433,10 +433,15 @@ class App:
             self.root.after(0, lambda: status_var.set("Clamping colors…"))
 
             # ── Build palette from named colors ────────────────────────────────
-            palette_rgb: list[tuple[int, int, int]] = []
+            # White is always included — the generated image has a white
+            # background and omitting it causes background pixels to bleed
+            # into the nearest non-white color.
+            palette_rgb: list[tuple[int, int, int]] = [(255, 255, 255)]
             for name in colors:
                 try:
-                    palette_rgb.append(ImageColor.getrgb(name.strip())[:3])
+                    rgb = ImageColor.getrgb(name.strip())[:3]
+                    if rgb not in palette_rgb:
+                        palette_rgb.append(rgb)
                 except Exception:
                     pass
 

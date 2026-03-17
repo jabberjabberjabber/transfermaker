@@ -369,11 +369,17 @@ def process_svg(input_path, output_path, min_size_mm, simplify_tol_mm=0.0, keep_
         if geom is None:
             continue
 
-        # Morphological opening in pure vector space:
-        #   buffer(-r) erodes — features narrower than 2r disappear entirely
-        #   buffer(+r) dilates — restores surviving geometry to original extent
+        # 1. Morphological closing: buffer(+r).buffer(-r)
+        #    Fills any gap narrower than 2r between nearby same-colour shapes.
+        #    This fixes the common "two outlines with a thin gap" tracing
+        #    artifact where a raster stroke is vectorised as two filled hulls.
+        # 2. Morphological opening: buffer(-r).buffer(+r)
+        #    Removes protrusions/features narrower than 2r from the result.
         try:
-            thick = geom.buffer(-r, resolution=16).buffer(r, resolution=16)
+            closed = geom.buffer(r, resolution=16).buffer(-r, resolution=16)
+            if not closed.is_valid:
+                closed = make_valid(closed)
+            thick = closed.buffer(-r, resolution=16).buffer(r, resolution=16)
             if not thick.is_valid:
                 thick = make_valid(thick)
             thick = remove_artifacts(thick, r)
