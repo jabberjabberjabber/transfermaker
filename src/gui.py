@@ -43,12 +43,36 @@ class App:
         self.container = ttk.Frame(self.root, padding=16)
         self.container.pack(fill=tk.BOTH, expand=True)
 
+        # Persistent toolbar at the bottom
+        toolbar = ttk.Frame(self.root, padding=(16, 0, 16, 8))
+        toolbar.pack(fill=tk.X, side=tk.BOTTOM)
+        ttk.Separator(self.root, orient="horizontal").pack(fill=tk.X, side=tk.BOTTOM)
+        def _confirm_reset():
+            if messagebox.askyesno("Start Over",
+                                   "Discard the current session and start over?"):
+                self._reset_session()
+
+        ttk.Button(toolbar, text="Start Over",
+                   command=_confirm_reset).pack(side=tk.RIGHT)
+
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.step1_wait_for_api()
 
     def _on_close(self):
         self.root.destroy()
         os._exit(0)
+
+    def _reset_session(self):
+        """Clear all session state and return to the upload step."""
+        self.source_image_path = None
+        self.processed_b64 = None
+        self.processed_pil = None
+        self.settings = {}
+        self.generated_images = []
+        self.selected_image = None
+        self.clamped_image = None
+        self.svg_string = None
+        self.step2_upload_image()
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -584,6 +608,7 @@ class App:
                         self.settings["width_mm"],
                         self.settings["height_mm"],
                     )
+                    self._reset_session()
 
             self._nav_row(frame, back_cmd=self.step8_vectorize,
                           fwd_text="Save SVG…", fwd_cmd=save)
