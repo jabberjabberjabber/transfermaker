@@ -94,7 +94,7 @@
   "sdflashattention": false,
   "sdoffloadcpu": true,
   "sdvaecpu": true,
-  "sdclipgpu": true,
+  "sdclipgpu": false,
   "sdconvdirect": "off",
   "sdvae": "https://huggingface.co/koboldcpp/GGUFDumps/resolve/main/flux2vae.safetensors",
   "sdvaeauto": true,
