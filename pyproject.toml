@@ -8,8 +8,15 @@ dependencies = [
     "requests",
     "Pillow",
     "pillow-heif",
+    "numpy",
     "vtracer",
     "cairosvg",
     "shapely",
     "lxml",
+    "opencv-python>=4.13.0.92",
+    "potracer>=0.0.4",
+    "cython>=3.2.4",
+    "pygco>=0.0.16",
 ]
+[tool.uv.extra-build-dependencies]
+pygco = ["Cython", "numpy"]

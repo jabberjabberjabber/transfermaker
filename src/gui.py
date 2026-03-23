@@ -17,8 +17,55 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from image_processor import ImageProcessor
 
-API_BASE = "http://localhost:5001"
+
 PREVIEW_MAX = 512
+
+_RESOURCES = Path(__file__).parent.parent / "resources"
+
+_CONFIG_DEFAULTS: dict = {
+    "max_dimension":      512,
+    "width_mm":           200,
+    "height_mm":          200,
+    "min_thickness_mm":   1.5,
+    "attempts":           4,
+    "colors":             ["black", "white", "red"],
+    "background_color":   "white",
+    "special_requests":   "",
+    "vectorizer":         "potrace",
+    "api_base":           "http://localhost:5001",
+    "prompt_template": (
+        "Convert the reference image into a bold high contrast graphic design "
+        "using only {colors} suitable for vinyl cutting. "
+        "Flat solid shapes, no gradients, no fine detail, clean sharp edges, "
+        "white background, style of a screen print or sticker design."
+    ),
+    "generation_params":   {"cfg_scale": 1, "steps": 6, "sampler_name": "Euler", "seed": -1},
+    "potrace_params":      {"turdsize": 2, "alphamax": 1.0, "opticurve": True, "opttolerance": 0.2},
+    "opencv_params":       {"approx_epsilon": 1.5},
+    "thinchecker_params":  {"simplify_tol_mm": 0.1},
+}
+
+def _load_config() -> dict:
+    import json
+    cfg = dict(_CONFIG_DEFAULTS)
+    path = _RESOURCES / "config.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for key, default in _CONFIG_DEFAULTS.items():
+            if key not in data:
+                continue
+            if isinstance(default, dict):
+                # Merge so extra keys in config flow through as kwargs
+                merged = dict(default)
+                merged.update(data[key])
+                cfg[key] = merged
+            else:
+                cfg[key] = data[key]
+    except Exception:
+        pass   # missing or malformed — use defaults
+    return cfg
+
+CONFIG: dict = _load_config()
 
 
 class App:
@@ -34,6 +81,8 @@ class App:
         self.settings: dict = {}
         self.generated_images: list[Image.Image] = []
         self.selected_image: Image.Image | None = None
+        self.upscaled_image: Image.Image | None = None
+        self.color_layers: list[tuple[str, tuple, Image.Image]] = []  # (name, rgb, mask)
         self.clamped_image: Image.Image | None = None
         self.svg_string: str | None = None
 
@@ -70,6 +119,8 @@ class App:
         self.settings = {}
         self.generated_images = []
         self.selected_image = None
+        self.upscaled_image = None
+        self.color_layers = []
         self.clamped_image = None
         self.svg_string = None
         self.step2_upload_image()
@@ -124,7 +175,7 @@ class App:
             import time
             while True:
                 try:
-                    r = requests.get(f"{API_BASE}/sdapi/v1/options", timeout=3)
+                    r = requests.get(f"{CONFIG["api_base"]}/sdapi/v1/options", timeout=3)
                     if r.status_code == 200:
                         self.root.after(0, self.step2_upload_image)
                         return
@@ -160,7 +211,7 @@ class App:
             if not path:
                 return
             try:
-                processor = ImageProcessor(max_dimension=1024)
+                processor = ImageProcessor(max_dimension=CONFIG["max_dimension"])
                 b64, _ = processor.process_image(path)
                 if not b64:
                     messagebox.showerror("Error", "Unsupported image format.")
@@ -214,10 +265,10 @@ class App:
             cls(r, textvariable=var, **kw).pack(side=tk.LEFT)
             return var
 
-        width_var    = field("Output width (mm):",           200)
-        height_var   = field("Output height (mm):",          200)
-        thick_var    = field("Min feature thickness (mm):",  1.5)
-        attempts_var = field("Generation attempts (1–8):",   4, ttk.Spinbox, from_=1, to=8, width=5)
+        width_var    = field("Output width (mm):",           CONFIG["width_mm"])
+        height_var   = field("Output height (mm):",          CONFIG["height_mm"])
+        thick_var    = field("Min feature thickness (mm):",  CONFIG["min_thickness_mm"])
+        attempts_var = field("Generation attempts (1–8):",   CONFIG["attempts"], ttk.Spinbox, from_=1, to=8, width=5)
 
         # ── Dynamic color list ─────────────────────────────────────────────────
         color_section = ttk.LabelFrame(form, text="Colors  (name or hex, e.g. 'black', '#c0392b')")
@@ -254,15 +305,28 @@ class App:
             ttk.Button(row, text="−", width=2, command=remove).pack(side=tk.LEFT)
             color_rows.append((var, row))
 
-        for c in ("black", "white", "red"):
+        for c in CONFIG["colors"]:
             add_color_row(c)
 
         ttk.Button(color_section, text="+ Add color",
                    command=add_color_row).pack(anchor="w", padx=4, pady=(0, 4))
 
+        # ── Background color ───────────────────────────────────────────────────
+        bg_row = ttk.Frame(form)
+        bg_row.pack(fill=tk.X, pady=(10, 0))
+        ttk.Label(bg_row, text="Background color:", width=32, anchor="e").pack(side=tk.LEFT, padx=(0, 8))
+        bg_var = tk.StringVar(value=CONFIG["background_color"])
+        ttk.Entry(bg_row, textvariable=bg_var, width=22).pack(side=tk.LEFT)
+        bg_swatch = tk.Label(bg_row, width=3, bg="#ffffff", relief="sunken")
+        bg_swatch.pack(side=tk.LEFT, padx=4)
+        bg_var.trace_add("write", lambda *_: _refresh_swatch(bg_swatch, bg_var))
+        _refresh_swatch(bg_swatch, bg_var)
+
         ttk.Label(form, text="Special requests (optional):").pack(anchor="w", pady=(10, 2))
         requests_box = tk.Text(form, height=3, wrap=tk.WORD, width=52)
         requests_box.pack(fill=tk.X)
+        if CONFIG["special_requests"]:
+            requests_box.insert("1.0", CONFIG["special_requests"])
 
         def go():
             try:
@@ -281,6 +345,7 @@ class App:
             self.settings = {
                 "width_mm": w, "height_mm": h, "min_thickness_mm": t,
                 "colors": colors, "attempts": a,
+                "background_color": bg_var.get().strip() or "white",
                 "special_requests": requests_box.get("1.0", tk.END).strip(),
             }
             self.step5_generate()
@@ -316,27 +381,21 @@ class App:
         colors = self.settings["colors"]
         color_list = ", ".join(colors[:-1]) + f" and {colors[-1]}" if len(colors) > 1 else colors[0]
         special = self.settings["special_requests"]
-        prompt = (
-            f"Convert the reference image into a bold high contrast graphic design "
-            f"using only {color_list} suitable for vinyl cutting. "
-            f"Flat solid shapes, no gradients, no fine detail, clean sharp edges, "
-            f"white background, style of a screen print or sticker design."
-        )
+        background_color = self.settings["background_color"]
+        prompt = CONFIG["prompt_template"].format(
+            colors=color_list, background_color=background_color)
         if special:
             prompt += f" {special}"
 
         def generate_one() -> Image.Image:
             payload = {
+                **CONFIG["generation_params"],
                 "prompt": prompt,
-                "cfg_scale": 1,
-                "steps": 6,
-                "seed": -1,
-                "sampler_name": "Euler",
-                "width": self.processed_pil.width,
+                "width":  self.processed_pil.width,
                 "height": self.processed_pil.height,
                 "extra_images": [self.processed_b64],
             }
-            r = requests.post(f"{API_BASE}/sdapi/v1/img2img", json=payload, timeout=300)
+            r = requests.post(f"{CONFIG["api_base"]}/sdapi/v1/img2img", json=payload, timeout=300)
             r.raise_for_status()
             img = Image.open(io.BytesIO(base64.b64decode(r.json()["images"][0])))
             img.load()
@@ -435,6 +494,7 @@ class App:
         bar.start(12)
 
         def run():
+            import numpy as np
             from PIL import ImageColor
 
             # ── Upscale selected image ─────────────────────────────────────────
@@ -443,7 +503,7 @@ class App:
                 buf = io.BytesIO()
                 self.selected_image.save(buf, format="PNG")
                 up = requests.post(
-                    f"{API_BASE}/sdapi/v1/upscale",
+                    f"{CONFIG["api_base"]}/sdapi/v1/upscale",
                     json={"image": base64.b64encode(buf.getvalue()).decode(),
                           "upscaling_resize": 4},
                     timeout=300,
@@ -454,37 +514,41 @@ class App:
             except Exception as e:
                 self.root.after(0, lambda: status_var.set(f"Upscale failed ({e}), using original."))
 
+            self.upscaled_image = upscaled
             self.root.after(0, lambda: status_var.set("Clamping colors…"))
 
-            # ── Build palette from named colors ────────────────────────────────
-            # White is always included — the generated image has a white
-            # background and omitting it causes background pixels to bleed
-            # into the nearest non-white color.
-            palette_rgb: list[tuple[int, int, int]] = [(255, 255, 255)]
+            # ── Build ordered (name, rgb) pairs — background color always first ───────────
+            color_specs: list[tuple[str, tuple]] = []
+            seen: set = set()
+
+            def try_add(name, rgb):
+                if rgb not in seen:
+                    seen.add(rgb)
+                    color_specs.append((name, rgb))
+
+            bg_name = self.settings["background_color"]
+            try:
+                bg_rgb = ImageColor.getrgb(bg_name.strip())[:3]
+            except Exception:
+                bg_rgb = (255, 255, 255)
+            try_add(bg_name, bg_rgb)
             for name in colors:
                 try:
-                    rgb = ImageColor.getrgb(name.strip())[:3]
-                    if rgb not in palette_rgb:
-                        palette_rgb.append(rgb)
+                    try_add(name, ImageColor.getrgb(name.strip())[:3])
                 except Exception:
                     pass
 
-            if not palette_rgb:
-                self.clamped_image = upscaled.convert("RGB")
-                self.root.after(0, show)
-                return
+            # ── Quantize to the exact palette ──────────────────────────────────
+            from mrf_quantize import mrf_quantize
 
-            # PIL quantize with a custom palette does nearest-neighbor mapping
-            # (no dithering) to the exact colors we specify.
-            palette_img = Image.new("P", (1, 1))
-            flat = []
-            for r, g, b in palette_rgb:
-                flat.extend([r, g, b])
-            flat.extend([0] * (768 - len(flat)))   # pad to 256 entries
-            palette_img.putpalette(flat)
-
-            img = upscaled.convert("RGB")
-            self.clamped_image = img.quantize(palette=palette_img, dither=0).convert("RGB")
+            _, self.clamped_image, self.color_layers = mrf_quantize(
+                upscaled,
+                color_specs,
+                alpha=8.0,      # ↑ simpler cuts, fewer fragments to weed
+                beta=40.0,       # ↑ boundaries snap harder to drawn edges
+                sigma_color=50.0,
+                sigma_pair=30.0,
+            )
             self.root.after(0, show)
 
         def show():
@@ -511,45 +575,92 @@ class App:
         self._header(frame, "Step 7 of 8 — Vectorization",
                      "Tracing image into SVG paths for vinyl cutting.")
 
-        bar = ttk.Progressbar(frame, mode="indeterminate", length=380)
-        bar.pack(pady=10)
-        bar.start(12)
-        status_var = tk.StringVar(value="Tracing…")
-        ttk.Label(frame, textvariable=status_var).pack()
+        # ── Vectorizer choice ──────────────────────────────────────────────────
+        engine_var = tk.StringVar(value=CONFIG["vectorizer"])
+        choice_frame = ttk.LabelFrame(frame, text="Vectorizer", padding=(12, 6))
+        choice_frame.pack(anchor="w", pady=(0, 10))
+        ttk.Radiobutton(
+            choice_frame, text="Potrace  — smooth Bézier curves",
+            variable=engine_var, value="potrace",
+        ).pack(anchor="w")
+        ttk.Radiobutton(
+            choice_frame, text="OpenCV   — fast polygon tracing",
+            variable=engine_var, value="opencv",
+        ).pack(anchor="w")
 
-        def run():
+        # Progress widgets (hidden until tracing starts)
+        progress_frame = ttk.Frame(frame)
+        bar = ttk.Progressbar(progress_frame, mode="indeterminate", length=380)
+        bar.pack()
+        status_var = tk.StringVar(value="")
+        ttk.Label(progress_frame, textvariable=status_var).pack(pady=4)
+
+        nav = self._nav_row(frame, back_cmd=self.step7_clamp_colors,
+                            fwd_text="Vectorize →",
+                            fwd_cmd=lambda: _start(engine_var.get()))
+
+        def _start(engine: str):
+            nav.configure(state="disabled")
+            choice_frame.pack_forget()
+            progress_frame.pack(pady=10)
+            bar.start(12)
+            status_var.set("Starting…")
+            threading.Thread(target=lambda: run(engine), daemon=True).start()
+
+        def run(engine: str):
             try:
-                import vtracer
-                buf = io.BytesIO()
-                self.clamped_image.convert("RGBA").save(buf, format="PNG")
-                self.svg_string = vtracer.convert_raw_image_to_svg(
-                    buf.getvalue(),
-                    img_format="png",
-                    colormode="color",
-                    hierarchical="stacked",
-                    mode="spline",
-                    filter_speckle=4,
-                    color_precision=6,
-                    layer_difference=16,
-                    corner_threshold=60,
-                    length_threshold=4.0,
-                    splice_threshold=45,
+                import numpy as np
+                from lxml import etree
+
+                SVGNS = "http://www.w3.org/2000/svg"
+                INK   = "http://www.inkscape.org/namespaces/inkscape"
+
+                W, H = self.clamped_image.size
+                total = len(self.color_layers)
+
+                root_svg = etree.Element(
+                    f"{{{SVGNS}}}svg",
+                    nsmap={None: SVGNS, "inkscape": INK},
+                )
+                root_svg.set("width",   str(W))
+                root_svg.set("height",  str(H))
+                root_svg.set("viewBox", f"0 0 {W} {H}")
+
+                for i, (name, rgb, mask_img) in enumerate(self.color_layers):
+                    self.root.after(0, lambda i=i, n=name: status_var.set(
+                        f"Tracing layer {i + 1}/{total}: {n}…"))
+
+                    arr       = np.array(mask_img)
+                    # 255 = foreground (this colour's pixels) for both engines
+                    binary    = np.where(arr == 0, 255, 0).astype(np.uint8)
+                    hex_color = f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+                    group = etree.SubElement(root_svg, f"{{{SVGNS}}}g")
+                    group.set("id",                  f"layer_{name.replace(' ', '_')}")
+                    group.set(f"{{{INK}}}label",     name)
+                    group.set(f"{{{INK}}}groupmode", "layer")
+                    style = f"fill:{hex_color};fill-rule:evenodd;stroke:none"
+
+                    if engine == "potrace":
+                        _trace_potrace(binary, group, style, SVGNS)
+                    else:
+                        _trace_opencv(binary, group, style, SVGNS)
+
+                self.svg_string = etree.tostring(
+                    root_svg, pretty_print=True, encoding="unicode"
                 )
                 self.root.after(0, show)
             except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("Vectorization failed", str(e)))
+                self.root.after(0, lambda e=e: messagebox.showerror("Vectorization failed", str(e)))
 
         def show():
             bar.stop()
-            bar.destroy()
             status_var.set("Vectorization complete.")
             preview = _svg_preview(self.svg_string) or self.clamped_image
             ph = self._photo(preview, max_size=440)
             ttk.Label(frame, image=ph).pack(pady=6)
-            self._nav_row(frame, back_cmd=self.step7_clamp_colors,
-                          fwd_text="Check & Save →", fwd_cmd=self.step9_thin_check)
-
-        threading.Thread(target=run, daemon=True).start()
+            ttk.Button(frame, text="Check & Save →",
+                       command=self.step9_thin_check).pack(pady=4)
 
     # ── Step 9: Thin check + save ──────────────────────────────────────────────
 
@@ -577,7 +688,7 @@ class App:
                     f_in.write(self.svg_string)
                     in_path = f_in.name
                 out_path = in_path.replace(".svg", "_checked.svg")
-                thin_process(in_path, out_path, min_mm, simplify_tol_mm=0.1)
+                thin_process(in_path, out_path, min_mm, **CONFIG["thinchecker_params"])
                 with open(out_path, "r", encoding="utf-8") as f:
                     checked_svg = f.read()
                 os.unlink(in_path)
@@ -607,6 +718,8 @@ class App:
                         final_svg, path,
                         self.settings["width_mm"],
                         self.settings["height_mm"],
+                        upscaled_image=self.upscaled_image,
+                        color_layers=self.color_layers,
                     )
                     self._reset_session()
 
@@ -617,6 +730,84 @@ class App:
 
 
 # ── Module-level helpers ───────────────────────────────────────────────────────
+
+def _trace_potrace(binary, group, style: str, SVGNS: str):
+    """
+    Trace a binary mask with potracer (pip install potracer) and append <path>
+    elements to *group*.  binary is uint8, 255 = foreground.  Produces smooth
+    Bézier curves with native hole support via alternating curve winding.
+    """
+    from potrace import Bitmap   # package: potracer
+    from PIL import Image
+    from lxml import etree
+
+    img  = Image.fromarray(binary)
+    bm   = Bitmap(img, blacklevel=0.5)
+    bm.invert()
+    path = bm.trace(**CONFIG["potrace_params"])
+
+    for curve in path:
+        sp = curve.start_point
+        d  = f"M {sp.x:.3f},{sp.y:.3f}"
+        for seg in curve.segments:
+            if seg.is_corner:
+                c, e = seg.c, seg.end_point
+                d += f" L {c.x:.3f},{c.y:.3f} L {e.x:.3f},{e.y:.3f}"
+            else:
+                c1, c2, e = seg.c1, seg.c2, seg.end_point
+                d += (f" C {c1.x:.3f},{c1.y:.3f}"
+                      f" {c2.x:.3f},{c2.y:.3f}"
+                      f" {e.x:.3f},{e.y:.3f}")
+        d += " Z"
+        el = etree.SubElement(group, f"{{{SVGNS}}}path")
+        el.set("style", style)
+        el.set("d", d)
+
+
+def _trace_opencv(binary, group, style: str, SVGNS: str):
+    """
+    Trace a binary mask with OpenCV findContours and append <path> elements to
+    *group*.  binary is uint8, 255 = foreground.  Uses RETR_CCOMP so that
+    direct child contours (holes) are appended as reversed subpaths and cut out
+    via fill-rule:evenodd.
+    """
+    import cv2
+    import numpy as np
+    from lxml import etree
+
+    contours, hierarchy = cv2.findContours(
+        binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_KCOS
+    )
+    if hierarchy is None or len(contours) == 0:
+        return
+
+    hier = hierarchy[0]   # (N,4): [next, prev, first_child, parent]
+    eps  = CONFIG["opencv_params"].get("approx_epsilon", 1.5)
+
+    def _pts_to_d(pts):
+        pts = pts.reshape(-1, 2)
+        d = f"M {pts[0,0]},{pts[0,1]}"
+        for p in pts[1:]:
+            d += f" L {p[0]},{p[1]}"
+        return d + " Z"
+
+    for contour, h in zip(contours, hier):
+        if h[3] != -1:
+            continue   # hole — appended below via its parent
+        outer = cv2.approxPolyDP(contour, eps, True)
+        if len(outer) < 3:
+            continue
+        d = _pts_to_d(outer)
+        child = h[2]
+        while child != -1:
+            hole = cv2.approxPolyDP(contours[child], eps, True)
+            if len(hole) >= 3:
+                d += " " + _pts_to_d(hole[::-1])
+            child = hier[child][0]
+        el = etree.SubElement(group, f"{{{SVGNS}}}path")
+        el.set("style", style)
+        el.set("d", d)
+
 
 def _svg_preview(svg_string: str) -> Image.Image | None:
     """Rasterize SVG to a PIL Image for in-app preview. Returns None if unavailable."""
@@ -631,11 +822,21 @@ def _svg_preview(svg_string: str) -> Image.Image | None:
 
 
 def _save_svg_layers(svg_string: str, base_path: str,
-                     width_mm: float, height_mm: float):
-    """Save the SVG with physical mm dimensions stamped onto it."""
+                     width_mm: float, height_mm: float,
+                     upscaled_image=None, color_layers=None):
+    """
+    Save:
+      • <name>.svg          — layered SVG with mm dimensions
+      • <name>_upscaled.png — pre-clamped upscaled generation
+      • <name>_<color>.png  — colored PNG per layer (color on background)
+    """
+    import numpy as np
     from lxml import etree
 
     base = Path(base_path)
+    saved: list[str] = []
+
+    # ── SVG ───────────────────────────────────────────────────────────────────
     try:
         root = etree.fromstring(svg_string.encode())
         vb = root.get("viewBox") or (
@@ -648,8 +849,28 @@ def _save_svg_layers(svg_string: str, base_path: str,
                                         xml_declaration=True, encoding="UTF-8"))
     except Exception:
         base.write_text(svg_string, encoding="utf-8")
+    saved.append(str(base))
 
-    messagebox.showinfo("Saved", f"Saved:\n{base_path}")
+    # ── Upscaled PNG ──────────────────────────────────────────────────────────
+    if upscaled_image is not None:
+        p = base.with_name(f"{base.stem}_upscaled.png")
+        upscaled_image.save(p, format="PNG")
+        saved.append(str(p))
+
+    # ── Per-color PNGs (color pixels on background) ─────────────────────
+    if color_layers:
+        for name, rgb, mask_img in color_layers:
+            safe = name.replace(" ", "_").replace("/", "_")
+            p = base.with_name(f"{base.stem}_{safe}.png")
+            # mask_img: 0=this color, 255=other — invert to make a colored layer
+            arr = np.array(mask_img)           # 0 where color, 255 elsewhere
+            out = np.full((*arr.shape, 3), 255, dtype=np.uint8)  # white canvas
+            out[arr == 0] = list(rgb)          # paint actual color
+            Image.fromarray(out, mode="RGB").save(p, format="PNG")
+            saved.append(str(p))
+
+    messagebox.showinfo("Saved",
+                        f"Saved {len(saved)} file(s):\n" + "\n".join(saved))
 
 
 def main():

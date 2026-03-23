@@ -1,0 +1,38 @@
+{
+  "_comment": "All fields are optional — missing keys fall back to built-in defaults.",
+  "max_dimension":		512,
+  "width_mm":           200,
+  "height_mm":          250,
+  "min_thickness_mm":   3,
+  "attempts":           4,
+  "colors":             ["white", "black", "grey"],
+  "background_color": 	"blue",
+  "special_requests":   "",
+  "vectorizer":         "opencv",
+  "api_base":			"http://localhost:5001",
+
+  "prompt_template": "Our goal is to represent the reference image as a t-shirt print or a sticker. We are taking the content of the picture and converting it to be cut out of layers of colored vinyl or stencil. The colors must be solid, bold, and without fine detail. Make the background a uniform {background_color} color against which the subject will contrast and there should not be a border or stroke around any objects. Besides the background color, which is unique to the background, {colors} can be used. If possible use all of the available colors. Every color must maintain a single shade, intensity, and hue, without gradients or dithering. Keep details low, corners obtuse, shapes solid, features thick, and contrast high. Any overlapping layers can only feature one color which must be completely opaque.",
+
+  "generation_params": {
+    "cfg_scale":    1,
+    "steps":        6,
+    "sampler_name": "Euler",
+    "seed":         -1,
+	"negative_prompt": ""
+  },
+
+  "potrace_params": {
+    "turdsize":     2,
+    "alphamax":     1.0,
+    "opticurve":    true,
+    "opttolerance": 0.2
+  },
+
+  "opencv_params": {
+    "approx_epsilon": 1.5
+  },
+
+  "thinchecker_params": {
+    "simplify_tol_mm": 0.1
+  }
+}

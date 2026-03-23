@@ -8,7 +8,7 @@ from PIL import Image
 from pillow_heif import register_heif_opener
 
 class ImageProcessor:
-    def __init__(self, max_dimension: int = 1024,
+    def __init__(self, max_dimension: int = 512,
                  patch_sizes: Optional[List[int]] = None,
                  max_file_size: int = 100 * 1024 * 1024):
         
