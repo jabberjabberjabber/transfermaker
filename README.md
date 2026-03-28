@@ -71,7 +71,7 @@ Once the generations are complete we choose the one we want. We have an option t
 
 In the next step the colors will be clamped. This means that the program conforms the colors in the image to the colors you specified in the beginning. 
 
-![Step3](./media/clamp_colors.png)
+![Step3](./media/clamp.png)
 
 It will then split the clamped colors into layers and vectorize each individually.
 
