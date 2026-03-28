@@ -91,7 +91,7 @@ Or, you can open it in an image editor and add things like text or alter whateve
 
 Complete!
 
-![Step7](./media/finished_shirt.jpg)
+![Step7](./media/shirt.jpg)
 
 ## Acknowledgements
 
