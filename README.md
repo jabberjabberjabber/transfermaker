@@ -39,39 +39,59 @@ Click the green '<> Code' button towards the top of the page and select 'Downloa
 
 Don't forget to click on the star!
 
-## Demo
+## Walkthrough
 
-![Step 1](./media/step01.png)
+For this walkthrough I am using the [ED-209.](https://youtu.be/Hzlt7IbTp6M?t=41) along with a line spoken as part of its failure mode.
 
-Choose the image.
+### Pre-Processing
 
-![Step 3](./media/step03.png) 
+First we have to find an image.
 
-Specify size, feature thickness, colors, and requirements.
+![Original](./media/ed-209.png)
 
-![Step 4](./media/step04.png)
+Then pre-process it. I desaturated it and modified contrast, brightness, and levels, to get this:
 
-Wait a long time for generations.
+![Pre-process](./media/ed-209-preprocessed.png)
 
-![Step 5](./media/step05.png)
+### Run TransferMaker
 
-Pick the best one.
+Next we go to the TransferMaker directory and run 'run-windows.bat'.
 
-![Step 6](./media/step06.png) 
+After the models download and the engine is running it will start the interface.
 
-Upscaling and color clamping (restricts to only base colors you specified).
+### Steps
 
-![Step 7](./media/step07.png)
+Choose your image and then choose the colors you want to use. The background needs to be a distinct color that won't be used -- it will be the t-shirt color. The minimum feature size is the thinnest segment in millimeters that you want to have. If you don't care, make it '0.1'. The special instructions are anything that you specifically want to have, like color choices "Make the hair red." or changing the image somehow "Close the man's eyes."
 
-Vectorize.
+![Step1](./media/define_params.png)
 
-![Step 8](./media/step08a.png) 
+Once the generations are complete we choose the one we want. We have an option to edit at this point, which will take the image we chose and put it through the model again with directions. Note that this has rapidly dimishing returns. 
 
-Remove thin features.
+![Step2](./media/pick_image.png)
 
-![Step 9](./media/step09.png) 
+In the next step the colors will be clamped. This means that the program conforms the colors in the image to the colors you specified in the beginning. 
 
-Open in vector image editor.
+![Step3](./media/clamp_colors.png)
+
+It will then split the clamped colors into layers and vectorize each individually.
+
+The last step is removing the thin sections as specified earlier.
+
+You can now save the completed SVG file and the intermediate layers.
+
+![Step4](./media/check.png)
+
+They should now be ready for printing. 
+
+![Step5](./media/edit1.png)
+
+Or, you can open it in an image editor and add things like text or alter whatever you need to before printing.
+
+![Step6](./media/add_text.png)
+
+Complete!
+
+![Step7](./media/finished_shirt.jpg)
 
 ## Acknowledgements
 
