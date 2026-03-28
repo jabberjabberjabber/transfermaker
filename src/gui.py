@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from image_processor import ImageProcessor
 
 
-PREVIEW_MAX = 512
+PREVIEW_MAX = 640
 
 _RESOURCES = Path(__file__).parent.parent / "resources"
 
@@ -72,7 +72,7 @@ class App:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("TransferMaker")
-        self.root.minsize(780, 580)
+        self.root.minsize(920, 680)
 
         # State shared across steps
         self.source_image_path: str | None = None
@@ -367,7 +367,7 @@ class App:
         bar.pack(pady=4)
 
         # Horizontally scrollable thumbnail strip
-        canvas = tk.Canvas(frame, height=220, highlightthickness=0)
+        canvas = tk.Canvas(frame, height=280, highlightthickness=0)
         hscroll = ttk.Scrollbar(frame, orient="horizontal", command=canvas.xview)
         canvas.configure(xscrollcommand=hscroll.set)
         canvas.pack(fill=tk.X, pady=6)
@@ -411,7 +411,7 @@ class App:
                     idx = len(self.generated_images) - 1
 
                     def add_thumb(img=img, idx=idx):
-                        ph = self._photo(img, max_size=180)
+                        ph = self._photo(img, max_size=240)
                         cell = ttk.Frame(thumb_row)
                         cell.grid(row=0, column=idx, padx=4)
                         ttk.Label(cell, image=ph).pack()
@@ -445,14 +445,25 @@ class App:
         selected_idx = tk.IntVar(value=-1)
         cells: list[ttk.Frame] = []
 
-        cols = min(4, len(self.generated_images))
-        grid_frame = ttk.Frame(frame)
-        grid_frame.pack(pady=6)
+        cols = min(2, len(self.generated_images))
+
+        # Vertically scrollable canvas for the image grid
+        outer = ttk.Frame(frame)
+        outer.pack(fill=tk.BOTH, expand=True, pady=6)
+        grid_canvas = tk.Canvas(outer, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=grid_canvas.yview)
+        grid_canvas.configure(yscrollcommand=vscroll.set)
+        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        grid_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        grid_frame = ttk.Frame(grid_canvas)
+        grid_canvas.create_window((0, 0), window=grid_frame, anchor="nw")
+        grid_frame.bind("<Configure>",
+                        lambda e: grid_canvas.configure(scrollregion=grid_canvas.bbox("all")))
 
         for idx, img in enumerate(self.generated_images):
-            ph = self._photo(img, max_size=200)
+            ph = self._photo(img, max_size=300)
             cell = ttk.Frame(grid_frame, relief="flat", borderwidth=2)
-            cell.grid(row=idx // cols, column=idx % cols, padx=6, pady=6)
+            cell.grid(row=idx // cols, column=idx % cols, padx=8, pady=8)
             cells.append(cell)
 
             lbl = tk.Label(cell, image=ph, cursor="hand2")
@@ -468,16 +479,137 @@ class App:
 
             lbl.bind("<Button-1>", lambda e, i=idx, c=cell: select(i, c))
 
-        def go():
+        def _require_selection() -> int:
             i = selected_idx.get()
             if i < 0:
                 messagebox.showinfo("No selection", "Click an image to select it first.")
+            return i
+
+        def clamp():
+            i = _require_selection()
+            if i < 0:
                 return
             self.selected_image = self.generated_images[i]
             self.step7_clamp_colors()
 
-        self._nav_row(frame, back_cmd=self.step5_generate,
-                      fwd_text="Continue →", fwd_cmd=go)
+        def edit():
+            i = _require_selection()
+            if i < 0:
+                return
+            self.step6_edit_image(self.generated_images[i])
+
+        row = ttk.Frame(frame)
+        row.pack(side=tk.BOTTOM, anchor="w", pady=12)
+        ttk.Button(row, text="← Back", command=self.step5_generate).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row, text="Edit…",   command=edit).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row, text="Clamp →", command=clamp).pack(side=tk.LEFT)
+
+    # ── Step 6b: Edit selected image ───────────────────────────────────────────
+
+    def step6_edit_image(self, source_image: "Image.Image"):
+        frame = self._new_frame()
+        self._header(frame, "Step 5 of 8 — Edit Design",
+                     "Describe changes to apply to the selected image, then generate new options.")
+
+        # Preview of the image being edited
+        ph = self._photo(source_image, max_size=300)
+        ttk.Label(frame, image=ph).pack(pady=(0, 8))
+
+        form = ttk.Frame(frame)
+        form.pack(fill=tk.X, padx=40)
+
+        ttk.Label(form, text="Edit instructions:").pack(anchor="w")
+        instructions_box = tk.Text(form, height=3, wrap=tk.WORD, width=60)
+        instructions_box.pack(fill=tk.X, pady=(2, 8))
+
+        att_row = ttk.Frame(form)
+        att_row.pack(anchor="w")
+        ttk.Label(att_row, text="Variations to generate:").pack(side=tk.LEFT, padx=(0, 8))
+        attempts_var = tk.StringVar(value=str(self.settings.get("attempts", CONFIG["attempts"])))
+        ttk.Spinbox(att_row, textvariable=attempts_var, from_=1, to=8, width=5).pack(side=tk.LEFT)
+
+        status_var = tk.StringVar(value="")
+        status_lbl = ttk.Label(frame, textvariable=status_var)
+        status_lbl.pack(pady=(8, 0))
+        bar = ttk.Progressbar(frame, length=440)
+        bar.pack(pady=4)
+
+        nav_row = ttk.Frame(frame)
+        nav_row.pack(side=tk.BOTTOM, anchor="w", pady=12)
+        back_btn = ttk.Button(nav_row, text="← Back", command=self.step6_pick_image)
+        back_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        def start():
+            instructions = instructions_box.get("1.0", tk.END).strip()
+            if not instructions:
+                messagebox.showinfo("No instructions", "Describe what to change before generating.")
+                return
+            try:
+                attempts = int(attempts_var.get())
+                assert 1 <= attempts <= 8
+            except Exception:
+                messagebox.showerror("Invalid input", "Attempts must be 1–8.")
+                return
+
+            generate_btn.configure(state="disabled")
+            back_btn.configure(state="disabled")
+            bar.configure(maximum=attempts)
+            bar["value"] = 0
+
+            colors = self.settings["colors"]
+            color_list = ", ".join(colors[:-1]) + f" and {colors[-1]}" if len(colors) > 1 else colors[0]
+            background_color = self.settings["background_color"]
+            base_prompt = CONFIG["prompt_template"].format(
+                colors=color_list, background_color=background_color)
+            prompt = f"{base_prompt} {instructions}"
+
+            buf = io.BytesIO()
+            source_image.save(buf, format="PNG")
+            src_b64 = base64.b64encode(buf.getvalue()).decode()
+
+            new_images: list = []
+
+            def generate_one():
+                payload = {
+                    **CONFIG["generation_params"],
+                    "prompt": prompt,
+                    "width":  source_image.width,
+                    "height": source_image.height,
+                    "extra_images": [src_b64],
+                }
+                r = requests.post(f"{CONFIG['api_base']}/sdapi/v1/img2img",
+                                  json=payload, timeout=300)
+                r.raise_for_status()
+                img = Image.open(io.BytesIO(base64.b64decode(r.json()["images"][0])))
+                img.load()
+                return img
+
+            def run():
+                for i in range(attempts):
+                    self.root.after(0, lambda i=i: status_var.set(
+                        f"Generating variation {i + 1} of {attempts}…"))
+                    try:
+                        img = generate_one()
+                        new_images.append(img)
+                        self.root.after(0, lambda: bar.step(1))
+                    except Exception as e:
+                        err = str(e)
+                        self.root.after(0, lambda err=err: status_var.set(f"Error: {err}"))
+                self.root.after(0, lambda: done(new_images))
+
+            def done(imgs):
+                if not imgs:
+                    status_var.set("No images were generated.")
+                    generate_btn.configure(state="normal")
+                    back_btn.configure(state="normal")
+                    return
+                self.generated_images = imgs
+                self.step6_pick_image()
+
+            threading.Thread(target=run, daemon=True).start()
+
+        generate_btn = ttk.Button(nav_row, text="Generate →", command=start)
+        generate_btn.pack(side=tk.LEFT)
 
     # ── Step 7: Clamp colors ───────────────────────────────────────────────────
 
@@ -556,11 +688,12 @@ class App:
             bar.destroy()
             pair = ttk.Frame(frame)
             pair.pack(pady=6)
-            for label, src in [("Selected", self.selected_image),
+            upscaled_src = self.upscaled_image or self.selected_image
+            for label, src in [("Upscaled", upscaled_src),
                                 ("Color Clamped", self.clamped_image)]:
                 cell = ttk.Frame(pair)
                 cell.pack(side=tk.LEFT, padx=16)
-                ph = self._photo(src, max_size=300)
+                ph = self._photo(src, max_size=360)
                 ttk.Label(cell, image=ph).pack()
                 ttk.Label(cell, text=label).pack()
             self._nav_row(frame, back_cmd=self.step6_pick_image,
@@ -575,19 +708,6 @@ class App:
         self._header(frame, "Step 7 of 8 — Vectorization",
                      "Tracing image into SVG paths for vinyl cutting.")
 
-        # ── Vectorizer choice ──────────────────────────────────────────────────
-        engine_var = tk.StringVar(value=CONFIG["vectorizer"])
-        choice_frame = ttk.LabelFrame(frame, text="Vectorizer", padding=(12, 6))
-        choice_frame.pack(anchor="w", pady=(0, 10))
-        ttk.Radiobutton(
-            choice_frame, text="Potrace  — smooth Bézier curves",
-            variable=engine_var, value="potrace",
-        ).pack(anchor="w")
-        ttk.Radiobutton(
-            choice_frame, text="OpenCV   — fast polygon tracing",
-            variable=engine_var, value="opencv",
-        ).pack(anchor="w")
-
         # Progress widgets (hidden until tracing starts)
         progress_frame = ttk.Frame(frame)
         bar = ttk.Progressbar(progress_frame, mode="indeterminate", length=380)
@@ -597,17 +717,16 @@ class App:
 
         nav = self._nav_row(frame, back_cmd=self.step7_clamp_colors,
                             fwd_text="Vectorize →",
-                            fwd_cmd=lambda: _start(engine_var.get()))
+                            fwd_cmd=lambda: _start())
 
-        def _start(engine: str):
+        def _start():
             nav.configure(state="disabled")
-            choice_frame.pack_forget()
             progress_frame.pack(pady=10)
             bar.start(12)
             status_var.set("Starting…")
-            threading.Thread(target=lambda: run(engine), daemon=True).start()
+            threading.Thread(target=run, daemon=True).start()
 
-        def run(engine: str):
+        def run():
             try:
                 import numpy as np
                 from lxml import etree
@@ -641,10 +760,7 @@ class App:
                     group.set(f"{{{INK}}}groupmode", "layer")
                     style = f"fill:{hex_color};fill-rule:evenodd;stroke:none"
 
-                    if engine == "potrace":
-                        _trace_potrace(binary, group, style, SVGNS)
-                    else:
-                        _trace_opencv(binary, group, style, SVGNS)
+                    _trace_potrace(binary, group, style, SVGNS)
 
                 self.svg_string = etree.tostring(
                     root_svg, pretty_print=True, encoding="unicode"
@@ -657,7 +773,7 @@ class App:
             bar.stop()
             status_var.set("Vectorization complete.")
             preview = _svg_preview(self.svg_string) or self.clamped_image
-            ph = self._photo(preview, max_size=440)
+            ph = self._photo(preview, max_size=600)
             ttk.Label(frame, image=ph).pack(pady=6)
             ttk.Button(frame, text="Check & Save →",
                        command=self.step9_thin_check).pack(pady=4)
@@ -704,7 +820,7 @@ class App:
             bar.stop()
             bar.destroy()
             preview = _svg_preview(final_svg) or self.clamped_image
-            ph = self._photo(preview, max_size=440)
+            ph = self._photo(preview, max_size=600)
             ttk.Label(frame, image=ph).pack(pady=6)
 
             def save():
@@ -733,9 +849,11 @@ class App:
 
 def _trace_potrace(binary, group, style: str, SVGNS: str):
     """
-    Trace a binary mask with potracer (pip install potracer) and append <path>
-    elements to *group*.  binary is uint8, 255 = foreground.  Produces smooth
-    Bézier curves with native hole support via alternating curve winding.
+    Trace a binary mask with potracer (pip install potracer) and append a single
+    <path> element to *group*.  All subpaths (outer contours and holes) are
+    accumulated into one d string so the SVG renderer can apply fill-rule:evenodd
+    across them — Potrace already sets winding direction correctly for holes.
+    binary is uint8, 255 = foreground.
     """
     from potrace import Bitmap   # package: potracer
     from PIL import Image
@@ -746,6 +864,7 @@ def _trace_potrace(binary, group, style: str, SVGNS: str):
     bm.invert()
     path = bm.trace(**CONFIG["potrace_params"])
 
+    parts = []
     for curve in path:
         sp = curve.start_point
         d  = f"M {sp.x:.3f},{sp.y:.3f}"
@@ -759,61 +878,20 @@ def _trace_potrace(binary, group, style: str, SVGNS: str):
                       f" {c2.x:.3f},{c2.y:.3f}"
                       f" {e.x:.3f},{e.y:.3f}")
         d += " Z"
+        parts.append(d)
+
+    if parts:
         el = etree.SubElement(group, f"{{{SVGNS}}}path")
         el.set("style", style)
-        el.set("d", d)
+        el.set("d", " ".join(parts))
 
 
-def _trace_opencv(binary, group, style: str, SVGNS: str):
-    """
-    Trace a binary mask with OpenCV findContours and append <path> elements to
-    *group*.  binary is uint8, 255 = foreground.  Uses RETR_CCOMP so that
-    direct child contours (holes) are appended as reversed subpaths and cut out
-    via fill-rule:evenodd.
-    """
-    import cv2
-    import numpy as np
-    from lxml import etree
 
-    contours, hierarchy = cv2.findContours(
-        binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_KCOS
-    )
-    if hierarchy is None or len(contours) == 0:
-        return
-
-    hier = hierarchy[0]   # (N,4): [next, prev, first_child, parent]
-    eps  = CONFIG["opencv_params"].get("approx_epsilon", 1.5)
-
-    def _pts_to_d(pts):
-        pts = pts.reshape(-1, 2)
-        d = f"M {pts[0,0]},{pts[0,1]}"
-        for p in pts[1:]:
-            d += f" L {p[0]},{p[1]}"
-        return d + " Z"
-
-    for contour, h in zip(contours, hier):
-        if h[3] != -1:
-            continue   # hole — appended below via its parent
-        outer = cv2.approxPolyDP(contour, eps, True)
-        if len(outer) < 3:
-            continue
-        d = _pts_to_d(outer)
-        child = h[2]
-        while child != -1:
-            hole = cv2.approxPolyDP(contours[child], eps, True)
-            if len(hole) >= 3:
-                d += " " + _pts_to_d(hole[::-1])
-            child = hier[child][0]
-        el = etree.SubElement(group, f"{{{SVGNS}}}path")
-        el.set("style", style)
-        el.set("d", d)
-
-
-def _svg_preview(svg_string: str) -> Image.Image | None:
+def _svg_preview(svg_string: str, output_size: int = 800) -> Image.Image | None:
     """Rasterize SVG to a PIL Image for in-app preview. Returns None if unavailable."""
     try:
         import cairosvg
-        png_bytes = cairosvg.svg2png(bytestring=svg_string.encode(), output_width=512)
+        png_bytes = cairosvg.svg2png(bytestring=svg_string.encode(), output_width=output_size)
         img = Image.open(io.BytesIO(png_bytes))
         img.load()
         return img
