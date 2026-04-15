@@ -1,21 +1,21 @@
 {
   "_comment": "All fields are optional — missing keys fall back to built-in defaults.",
   "max_dimension":		512,
-  "width_mm":           200,
-  "height_mm":          250,
-  "min_thickness_mm":   3,
-  "attempts":           4,
+  "width_mm":           150,
+  "height_mm":          200,
+  "min_thickness_mm":   0.1,
+  "attempts":           8,
   "colors":             ["white", "black", "grey"],
   "background_color": 	"blue",
   "special_requests":   "",
   "vectorizer":         "opencv",
   "api_base":			"http://localhost:5001",
 
-  "prompt_template": "Our goal is to represent the reference image as a t-shirt print or a sticker. We are taking the content of the picture and converting it to be cut out of layers of colored vinyl or stencil. The colors must be solid, bold, and without fine detail. Make the background a uniform {background_color} color against which the subject will contrast and there should not be a border or stroke around any objects. Besides the background color, which is unique to the background, {colors} can be used. If possible use all of the available colors. Every color must maintain a single shade, intensity, and hue, without gradients or dithering. Keep details low, corners obtuse, shapes solid, features thick, and contrast high. Any overlapping layers can only feature one color which must be completely opaque.",
+  "prompt_template": "Transform the the reference image into a stylized design as appropriate for a t-shirt or a stenciled poster. Available colors are restricted to {colors} along with {background_color} for the background color, alpha and negative space.  Make colors solid with a single luminosity. Any overlapping layers can only feature one color which must be completely opaque. Shapes should be thick, bold, and lacking in fine detail, with rounded corners and shallow convergences. Things like hair, grass, and other long and sharp portrusions must be stylized as blocks. When using {colors} on a {background_color} background, pay attention to edges and contrast and ensure that the reference image is well represented.",
 
   "generation_params": {
     "cfg_scale":    1,
-    "steps":        6,
+    "steps":        4,
     "sampler_name": "Euler",
     "seed":         -1,
 	"negative_prompt": ""
