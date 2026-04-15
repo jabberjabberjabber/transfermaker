@@ -166,7 +166,7 @@ def download_kobold():
     dest_path = resources / download_filename
     download_url = base_url + download_filename
 
-    # Update check: compare stored version tag against latest release
+    # Update check
     version_file = resources / ".kobold_version"
     current_version = version_file.read_text().strip() if version_file.exists() else None
 
@@ -187,7 +187,6 @@ def download_kobold():
             return dest_path   # download failed but old copy still usable
         raise RuntimeError(f"Failed to download KoboldCpp from {download_url}")
 
-    # Make executable on Unix
     if platform.system() != "Windows":
         dest_path.chmod(dest_path.stat().st_mode | 0o755)
 
@@ -230,7 +229,6 @@ def main():
         print("KoboldCpp not found in resources/. Downloading...")
         exe_path = download_kobold()
     else:
-        # Check for updates; fall back to existing exe on failure
         try:
             exe_path = download_kobold()
         except Exception as e:

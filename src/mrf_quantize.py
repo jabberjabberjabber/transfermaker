@@ -1,4 +1,21 @@
 """
+Color clamping: Reduce an image to a set of colors such the original
+image colors represented by the closest color to it in the set but with
+the constraints that the image not lose any interpretability. This is diff
+Code was completed by Claude Opus 4.6 based on prompts which directed 
+it to adapt the method described in the paper:
+
+ * https://www.sciencedirect.com/science/article/abs/pii/S0097849315000114
+ 
+Description in paper is:
+
+For a given user design, our algorithm automatically generates a set of stencil 
+layers satisfying all required properties. The task is formulated as a constrained 
+energy optimization problem and solved efficiently. Experiments, including a user 
+study, are carried out to examine the complete algorithm as well as each individual step.
+ 
+!! Claude has written everything below this line. !!
+
 MRF-based color quantization for HTV vinyl layer separation.
 
 Replaces PIL's per-pixel img.quantize() with spatially coherent
@@ -184,43 +201,3 @@ def mrf_quantize(
 
     clamped = Image.fromarray(clamped_arr, mode="RGB")
     return labels, clamped, color_layers
-
-
-# ── Drop-in replacement for your step7 quantization block ───────────────
-#
-# Replace this section of step7_clamp_colors:
-#
-#     palette_img = Image.new("P", (1, 1))
-#     flat = []
-#     for _, (r, g, b) in color_specs:
-#         flat.extend([r, g, b])
-#     flat.extend([0] * (768 - len(flat)))
-#     palette_img.putpalette(flat)
-#
-#     img = upscaled.convert("RGB")
-#     quantized = img.quantize(palette=palette_img, dither=0).convert("RGB")
-#
-#     arr = np.array(quantized)
-#     self.color_layers = []
-#     composite = np.zeros_like(arr)
-#
-#     for name, rgb in color_specs:
-#         mask_bool = np.all(arr == list(rgb), axis=-1)
-#         composite[mask_bool] = list(rgb)
-#         mask_data = np.where(mask_bool, 0, 255).astype(np.uint8)
-#         self.color_layers.append((name, rgb, Image.fromarray(mask_data, mode="L")))
-#
-#     self.clamped_image = Image.fromarray(composite.astype(np.uint8), mode="RGB")
-#
-# With:
-#
-#     from mrf_quantize import mrf_quantize
-#
-#     _, self.clamped_image, self.color_layers = mrf_quantize(
-#         upscaled,
-#         color_specs,
-#         alpha=8.0,      # ↑ simpler cuts, fewer fragments to weed
-#         beta=40.0,       # ↑ boundaries snap harder to drawn edges
-#         sigma_color=50.0,
-#         sigma_pair=30.0,
-#     )

@@ -18,13 +18,17 @@ sys.path.insert(0, str(Path(__file__).parent))
 from image_processor import ImageProcessor
 
 
-PREVIEW_MAX = 640
+PREVIEW_MAX = 1024
 
 _RESOURCES = Path(__file__).parent.parent / "resources"
 
+_PRESET_COLORS = ["white", "grey", "black",
+                  "cyan", "magenta", "yellow",
+                  "red", "orange", "green", "blue", "purple"]
+
 _CONFIG_DEFAULTS: dict = {
     "max_dimension":      512,
-    "width_mm":           200,
+    "width_mm":           250,
     "height_mm":          200,
     "min_thickness_mm":   1.5,
     "attempts":           4,
@@ -61,8 +65,8 @@ def _load_config() -> dict:
                 cfg[key] = merged
             else:
                 cfg[key] = data[key]
-    except Exception:
-        pass   # missing or malformed — use defaults
+    except Exception as e:
+        print(f"Warning: could not load config.json: {e}", file=sys.stderr)
     return cfg
 
 CONFIG: dict = _load_config()
@@ -86,16 +90,18 @@ class App:
         self.clamped_image: Image.Image | None = None
         self.svg_string: str | None = None
 
-        self._photo_refs: list = []   # prevent GC of PhotoImages
+        self._photo_refs: list = []
         self._step_frame: ttk.Frame | None = None
+        self.task: str | None = None
+        self._clamp_phase: str = "normal"
 
         self.container = ttk.Frame(self.root, padding=16)
         self.container.pack(fill=tk.BOTH, expand=True)
 
-        # Persistent toolbar at the bottom
         toolbar = ttk.Frame(self.root, padding=(16, 0, 16, 8))
         toolbar.pack(fill=tk.X, side=tk.BOTTOM)
         ttk.Separator(self.root, orient="horizontal").pack(fill=tk.X, side=tk.BOTTOM)
+        
         def _confirm_reset():
             if messagebox.askyesno("Start Over",
                                    "Discard the current session and start over?"):
@@ -107,12 +113,13 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.step1_wait_for_api()
 
+
     def _on_close(self):
         self.root.destroy()
         os._exit(0)
 
     def _reset_session(self):
-        """Clear all session state and return to the upload step."""
+        """Clear all session state and return to task selection."""
         self.source_image_path = None
         self.processed_b64 = None
         self.processed_pil = None
@@ -123,9 +130,9 @@ class App:
         self.color_layers = []
         self.clamped_image = None
         self.svg_string = None
-        self.step2_upload_image()
-
-    # ── Helpers ────────────────────────────────────────────────────────────────
+        self.task = None
+        self._clamp_phase = "normal"
+        self.step_task_select()
 
     def _new_frame(self) -> ttk.Frame:
         self._photo_refs.clear()
@@ -158,6 +165,32 @@ class App:
         btn.pack(side=tk.LEFT)
         return btn
 
+    def _build_prompt(self, extra: str = "") -> str:
+        colors = self.settings["colors"]
+        color_list = (", ".join(colors[:-1]) + f" and {colors[-1]}"
+                      if len(colors) > 1 else colors[0])
+        prompt = CONFIG["prompt_template"].format(
+            colors=color_list,
+            background_color=self.settings["background_color"],
+        )
+        if extra:
+            prompt += f" {extra}"
+        return prompt
+
+    def _call_img2img(self, prompt: str, width: int, height: int, b64: str) -> Image.Image:
+        payload = {
+            **CONFIG["generation_params"],
+            "prompt": prompt,
+            "width":  width,
+            "height": height,
+            "extra_images": [b64],
+        }
+        r = requests.post(f"{CONFIG['api_base']}/sdapi/v1/img2img", json=payload, timeout=600)
+        r.raise_for_status()
+        img = Image.open(io.BytesIO(base64.b64decode(r.json()["images"][0])))
+        img.load()
+        return img
+
     # ── Step 1: Wait for API ───────────────────────────────────────────────────
 
     def step1_wait_for_api(self):
@@ -177,7 +210,7 @@ class App:
                 try:
                     r = requests.get(f"{CONFIG["api_base"]}/sdapi/v1/options", timeout=3)
                     if r.status_code == 200:
-                        self.root.after(0, self.step2_upload_image)
+                        self.root.after(0, self.step_task_select)
                         return
                 except Exception:
                     pass
@@ -185,6 +218,442 @@ class App:
                 time.sleep(2)
 
         threading.Thread(target=poll, daemon=True).start()
+
+    # ── Task selection ─────────────────────────────────────────────────────────
+
+    def step_task_select(self):
+        frame = self._new_frame()
+        self._header(frame, "TransferMaker — Select Task",
+                     "Choose what you would like to do.")
+
+        tasks = [
+            ("Turn a Photo into a Transfer",
+             "photo_to_vectors",
+             "Transform a reference photo and a set of colors into vector objects ready for transfer."),
+            ("Duplicate an Existing Design",
+             "duplicate",
+             "Generate an SVG from a picture of an existing design\n"
+             "Pick colors from the image and attempt a quick clone, with the option to use an AI after viewing the result."),
+            ("Clamp Colors in an Image",
+             "clamp_only",
+             "Provide an image and specify a set of colors you will get a vector image using only those colors suitable for transfer."),
+        ]
+
+        task_var = tk.StringVar(value="")
+
+        for label, value, desc in tasks:
+            row = ttk.Frame(frame)
+            row.pack(anchor="w", pady=(8, 0), padx=20)
+            ttk.Radiobutton(row, text=label, variable=task_var,
+                            value=value, width=28).pack(side=tk.LEFT)
+            ttk.Label(row, text=desc, foreground="gray",
+                      wraplength=460, justify="left").pack(side=tk.LEFT, padx=(8, 0))
+
+        def go():
+            t = task_var.get()
+            if not t:
+                messagebox.showinfo("No selection", "Please select a task first.")
+                return
+            self.task = t
+            self.step2_upload_image()
+
+        self._nav_row(frame, fwd_text="Next →", fwd_cmd=go)
+
+    # ── Duplicate / Fix — check suitability ────────────────────────────────────
+
+    def step_dup_check_suitability(self):
+        """Review image info and confirm suitability (duplicate / fix_modify flows)."""
+        frame = self._new_frame()
+        task_label = ("Duplicate Design" if self.task == "duplicate"
+                      else "Fix or Modify Design")
+        self._header(frame, f"{task_label} — Check Image",
+                     "Review image details and confirm it is suitable to proceed.")
+
+        ph = self._photo(self.processed_pil, max_size=320)
+        ttk.Label(frame, image=ph).pack(pady=6)
+
+        img = self.processed_pil
+        mode_desc = {"RGB": "Full colour", "RGBA": "Full colour + transparency",
+                     "L": "Greyscale", "P": "Palette"}.get(img.mode, img.mode)
+        info = (f"Size: {img.width} × {img.height} px\n"
+                f"Mode: {mode_desc}\n"
+                f"File: {Path(self.source_image_path).name}")
+        ttk.Label(frame, text=info, justify="left", foreground="gray").pack(pady=4)
+
+        self._nav_row(frame,
+                      back_cmd=self.step3_confirm_image,
+                      fwd_text="Looks good →",
+                      fwd_cmd=self.step_color_picker)
+
+    # ── Unified colour picker (all tasks) ─────────────────────────────────────
+
+    def step_color_picker(self):
+        """Image-based colour picker used by every task flow."""
+        frame = self._new_frame()
+
+        if self.task == "duplicate":
+            title, desc = "Duplicate Design — Pick Colours", \
+                          "Click the image to sample a colour into the active slot. Scroll to zoom."
+        elif self.task == "fix_modify":
+            title, desc = "Fix or Modify Design — Pick Colours", \
+                          "Click the image to sample a colour into the active slot. Scroll to zoom."
+        elif self.task == "clamp_only":
+            title, desc = "Clamp Colors in Design — Pick Colours", \
+                          "Click the image to sample a colour into the active slot. Scroll to zoom."
+        else:  # photo_to_vectors
+            title, desc = "Step 3 of 8 — Colours & Settings", \
+                          "Click the image to sample a colour. Set dimensions and generation options."
+        self._header(frame, title, desc)
+
+        orig_img = Image.open(self.source_image_path).convert("RGB")
+
+        # ── Layout: image canvas left, controls right ──────────────────────────
+        panes = ttk.Frame(frame)
+        panes.pack(fill=tk.BOTH, expand=True)
+
+        img_outer = ttk.Frame(panes)
+        img_outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        hbar = ttk.Scrollbar(img_outer, orient="horizontal")
+        vbar = ttk.Scrollbar(img_outer, orient="vertical")
+        img_canvas = tk.Canvas(img_outer, bg="#1a1a1a", cursor="crosshair",
+                               xscrollcommand=hbar.set, yscrollcommand=vbar.set)
+        hbar.config(command=img_canvas.xview)
+        vbar.config(command=img_canvas.yview)
+        vbar.pack(side=tk.RIGHT, fill=tk.Y)
+        hbar.pack(side=tk.BOTTOM, fill=tk.X)
+        img_canvas.pack(fill=tk.BOTH, expand=True)
+
+        zoom_level = [1.0]
+        _ph_ref = [None]
+
+        def _render():
+            nw = max(1, int(orig_img.width  * zoom_level[0]))
+            nh = max(1, int(orig_img.height * zoom_level[0]))
+            resample = (Image.Resampling.NEAREST if zoom_level[0] > 1.5
+                        else Image.Resampling.LANCZOS)
+            scaled = orig_img.resize((nw, nh), resample)
+            ph = ImageTk.PhotoImage(scaled)
+            _ph_ref[0] = ph
+            img_canvas.delete("all")
+            img_canvas.create_image(0, 0, anchor="nw", image=ph)
+            img_canvas.configure(scrollregion=(0, 0, nw, nh))
+
+        def _zoom(event):
+            factor = 1.15 if event.delta > 0 else (1 / 1.15)
+            zoom_level[0] = max(0.1, min(zoom_level[0] * factor, 16.0))
+            _render()
+
+        img_canvas.bind("<Configure>", lambda e: _render())
+        img_canvas.bind("<MouseWheel>", _zoom)
+        img_canvas.bind("<Button-4>", lambda e: _zoom(type("_", (), {"delta":  1})()))
+        img_canvas.bind("<Button-5>", lambda e: _zoom(type("_", (), {"delta": -1})()))
+
+        # ── Controls panel ─────────────────────────────────────────────────────
+        ctrl = ttk.Frame(panes, padding=(12, 0, 0, 0), width=240)
+        ctrl.pack(side=tk.RIGHT, fill=tk.Y)
+        ctrl.pack_propagate(False)
+
+        # ── Slot system ────────────────────────────────────────────────────────
+        n_row = ttk.Frame(ctrl)
+        n_row.pack(anchor="w", pady=(0, 4))
+        ttk.Label(n_row, text="Design colors:").pack(side=tk.LEFT, padx=(0, 6))
+        n_var = tk.IntVar(value=4)
+
+        slots_frame = ttk.LabelFrame(ctrl, text="Slots  (click slot → click image)")
+        slots_frame.pack(fill=tk.X)
+
+        color_slots: list[tuple[tk.StringVar, tk.Label, ttk.Frame]] = []
+        active_slot = [1]
+
+        def _highlight_slots():
+            for j, (_, _, row) in enumerate(color_slots):
+                row.configure(relief="solid" if j == active_slot[0] else "flat",
+                              borderwidth=2 if j == active_slot[0] else 1)
+
+        def _set_active(i: int):
+            active_slot[0] = i
+            _highlight_slots()
+
+        def _refresh_swatch(var: tk.StringVar, swatch: tk.Label):
+            from PIL import ImageColor
+            try:
+                r, g, b = ImageColor.getrgb(var.get().strip())[:3]
+                swatch.configure(bg=f"#{r:02x}{g:02x}{b:02x}")
+            except Exception:
+                swatch.configure(bg="#888888")
+
+        def _rgb_dist(a, b):
+            return ((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2) ** 0.5
+
+        def _pick_best_bg():
+            """Set BG slot to the preset color most distant from all design colors."""
+            from PIL import ImageColor
+            design_rgbs = []
+            for v, _, _ in color_slots[1:]:
+                try:
+                    design_rgbs.append(ImageColor.getrgb(v.get().strip())[:3])
+                except Exception:
+                    pass
+            if not design_rgbs:
+                return
+            best_name, best_dist = _PRESET_COLORS[0], -1.0
+            for name in _PRESET_COLORS:
+                try:
+                    rgb = ImageColor.getrgb(name)[:3]
+                    min_d = min(_rgb_dist(rgb, d) for d in design_rgbs)
+                    if min_d > best_dist:
+                        best_dist, best_name = min_d, name
+                except Exception:
+                    pass
+            color_slots[0][0].set(best_name)
+
+        _BG_VALUES = ["Automatic"] + _PRESET_COLORS
+
+        def _add_slot(i: int, default: str = ""):
+            is_bg = (i == 0)
+            row = ttk.Frame(slots_frame, relief="flat", borderwidth=1)
+            row.pack(fill=tk.X, pady=1, padx=2)
+
+            lbl = ttk.Label(row, text="BG" if is_bg else f"{i}.", width=3)
+            if is_bg:
+                lbl.configure(foreground="#0066cc")
+            lbl.pack(side=tk.LEFT, padx=(4, 2))
+
+            swatch = tk.Label(row, width=3, bg="#888888", relief="sunken")
+            swatch.pack(side=tk.LEFT, padx=(0, 4), pady=3)
+
+            var = tk.StringVar(value=default)
+            if is_bg:
+                combo = ttk.Combobox(row, textvariable=var, values=_BG_VALUES,
+                                     width=10, state="readonly")
+            else:
+                combo = ttk.Combobox(row, textvariable=var, values=_PRESET_COLORS, width=10)
+            combo.pack(side=tk.LEFT, padx=(0, 4))
+
+            if is_bg:
+                ttk.Button(row, text="Auto", width=4,
+                           command=_pick_best_bg).pack(side=tk.LEFT, padx=(0, 2))
+
+            var.trace_add("write", lambda *_, v=var, s=swatch: _refresh_swatch(v, s))
+            _refresh_swatch(var, swatch)
+
+            for w in (row, lbl, swatch):
+                w.bind("<Button-1>", lambda e, idx=i: _set_active(idx))
+            combo.bind("<FocusIn>", lambda e, idx=i: _set_active(idx))
+            combo.bind("<Button-1>", lambda e, idx=i: _set_active(idx))
+            color_slots.append((var, swatch, row))
+
+        def _build_slots(n: int):
+            total = 1 + n
+            current = len(color_slots)
+            if total < current:
+                for i in range(current - 1, total - 1, -1):
+                    color_slots[i][2].destroy()
+                    color_slots.pop(i)
+            else:
+                for i in range(current, total):
+                    _add_slot(i, "Automatic" if i == 0 else "")
+            active_slot[0] = max(1, min(active_slot[0], total - 1))
+            _highlight_slots()
+
+        def _on_n_change(*_):
+            try:
+                n = int(n_var.get())
+                if 1 <= n <= 8:
+                    _build_slots(n)
+            except (ValueError, tk.TclError):
+                pass
+
+        ttk.Spinbox(n_row, textvariable=n_var, from_=1, to=8, width=4,
+                    command=_on_n_change).pack(side=tk.LEFT)
+        n_var.trace_add("write", _on_n_change)
+        _build_slots(4)
+
+        # ── Click canvas → sample pixel ────────────────────────────────────────
+        def _pick(event):
+            cx = img_canvas.canvasx(event.x)
+            cy = img_canvas.canvasy(event.y)
+            ox = max(0, min(int(cx / zoom_level[0]), orig_img.width  - 1))
+            oy = max(0, min(int(cy / zoom_level[0]), orig_img.height - 1))
+            r, g, b = orig_img.getpixel((ox, oy))
+            hex_col = f"#{r:02x}{g:02x}{b:02x}"
+            i = active_slot[0]
+            if 0 <= i < len(color_slots):
+                color_slots[i][0].set(hex_col)
+                for j in range(i + 1, len(color_slots)):
+                    if not color_slots[j][0].get():
+                        _set_active(j)
+                        return
+                _set_active(len(color_slots) - 1)
+
+        img_canvas.bind("<Button-1>", _pick)
+
+        # ── Dimension fields ───────────────────────────────────────────────────
+        ttk.Separator(ctrl, orient="horizontal").pack(fill=tk.X, pady=(10, 6))
+
+        def dim_field(label, default):
+            ttk.Label(ctrl, text=label).pack(anchor="w")
+            var = tk.StringVar(value=str(default))
+            ttk.Entry(ctrl, textvariable=var).pack(fill=tk.X, pady=(0, 5))
+            return var
+
+        width_var  = dim_field("Output width (mm):",   CONFIG["width_mm"])
+        height_var = dim_field("Output height (mm):",  CONFIG["height_mm"])
+        thick_var  = dim_field("Min thickness (mm):",  CONFIG["min_thickness_mm"])
+
+        # ── photo_to_vectors extras ────────────────────────────────────────────
+        attempts_var  = None
+        requests_box  = None
+        if self.task == "photo_to_vectors":
+            ttk.Separator(ctrl, orient="horizontal").pack(fill=tk.X, pady=(6, 6))
+            att_row = ttk.Frame(ctrl)
+            att_row.pack(anchor="w", pady=(0, 5))
+            ttk.Label(att_row, text="Attempts:").pack(side=tk.LEFT, padx=(0, 6))
+            attempts_var = tk.StringVar(value=str(CONFIG["attempts"]))
+            ttk.Spinbox(att_row, textvariable=attempts_var,
+                        from_=1, to=8, width=4).pack(side=tk.LEFT)
+            ttk.Label(ctrl, text="Special requests:").pack(anchor="w")
+            requests_box = tk.Text(ctrl, height=3, wrap=tk.WORD)
+            requests_box.pack(fill=tk.X, pady=(0, 5))
+            if CONFIG["special_requests"]:
+                requests_box.insert("1.0", CONFIG["special_requests"])
+
+        # ── Confirm ────────────────────────────────────────────────────────────
+        def go():
+            try:
+                w = float(width_var.get())
+                h = float(height_var.get())
+                t = float(thick_var.get())
+                assert w > 0 and h > 0 and t > 0
+            except Exception:
+                messagebox.showerror("Invalid input",
+                                     "Please check width, height and thickness.")
+                return
+            from PIL import ImageColor
+            colors = [v.get().strip() for v, _, _ in color_slots[1:] if v.get().strip()]
+            if not colors:
+                messagebox.showerror("No design colours",
+                                     "Pick at least one design colour.")
+                return
+            if color_slots[0][0].get().strip().lower() == "automatic":
+                _pick_best_bg()
+            bg_color = color_slots[0][0].get().strip() or "white"
+            try:
+                bg_rgb = ImageColor.getrgb(bg_color)[:3]
+                close = [c for c in colors if _rgb_dist(bg_rgb, ImageColor.getrgb(c)[:3]) < 80]
+                if close:
+                    if not messagebox.askyesno(
+                            "Background too similar",
+                            f"Background '{bg_color}' is very close to: {', '.join(close)}.\n"
+                            "This will cause those colors to clamp together.\n\n"
+                            "Continue anyway?"):
+                        return
+            except Exception:
+                pass
+            self.settings = {
+                "width_mm": w, "height_mm": h, "min_thickness_mm": t,
+                "colors": colors, "background_color": bg_color,
+                "attempts": CONFIG["attempts"], "special_requests": "",
+            }
+            if self.task == "photo_to_vectors":
+                try:
+                    a = int(attempts_var.get())
+                    assert 1 <= a <= 8
+                except Exception:
+                    messagebox.showerror("Invalid input", "Attempts must be 1–8.")
+                    return
+                self.settings["attempts"] = a
+                self.settings["special_requests"] = requests_box.get("1.0", tk.END).strip()
+                self.step5_generate()
+            elif self.task == "clamp_only":
+                self.selected_image = self.processed_pil
+                self._clamp_phase = "clamp_only"
+                self.step7_clamp_colors()
+            else:  # duplicate / fix_modify
+                self.selected_image = self.processed_pil
+                self._clamp_phase = ("first_dup" if self.task == "duplicate"
+                                     else "first_fix")
+                self.step7_clamp_colors()
+
+        def _back():
+            if self.task in ("duplicate", "fix_modify"):
+                self.step_dup_check_suitability()
+            else:
+                self.step3_confirm_image()
+
+        fwd_text = "Generate →" if self.task == "photo_to_vectors" else "Clamp →"
+        self._nav_row(frame, back_cmd=_back, fwd_text=fwd_text, fwd_cmd=go)
+
+    # ── Duplicate — post-clamp review ─────────────────────────────────────────
+
+    def step_dup_post_clamp(self):
+        """Ask whether the clamped result is good enough to vectorize (duplicate)."""
+        frame = self._new_frame()
+        self._header(frame, "Duplicate Design — Review Clamped Result",
+                     "Is the colour-clamped design ready for vinyl cutting?")
+
+        ph = self._photo(self.clamped_image, max_size=500)
+        ttk.Label(frame, image=ph).pack(pady=6)
+
+        row = ttk.Frame(frame)
+        row.pack(side=tk.BOTTOM, anchor="w", pady=12)
+        ttk.Button(row, text="← Back",
+                   command=self.step_color_picker).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row, text="Yes — Vectorize →",
+                   command=self.step8_vectorize).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row, text="No — Improve with Diffusion →",
+                   command=self.step_dup_generate_settings).pack(side=tk.LEFT)
+
+    # ── Duplicate / Fix — generation settings ─────────────────────────────────
+
+    def step_dup_generate_settings(self):
+        """Collect prompt and attempts before running diffusion (duplicate / fix_modify)."""
+        frame = self._new_frame()
+        task_label = ("Duplicate Design" if self.task == "duplicate"
+                      else "Fix or Modify Design")
+        default_instructions = (
+            "Reproduce this design faithfully for vinyl cutting. "
+            "Bold high contrast, flat solid shapes, no gradients, clean sharp edges."
+            if self.task == "duplicate" else ""
+        )
+        self._header(frame, f"{task_label} — Generation Instructions",
+                     "Describe how to transform the image, then generate.")
+
+        form = ttk.Frame(frame, padding=(40, 0))
+        form.pack(fill=tk.X)
+        ttk.Label(form, text="Instructions / custom prompt:").pack(anchor="w")
+        instructions_box = tk.Text(form, height=4, wrap=tk.WORD, width=60)
+        instructions_box.pack(fill=tk.X, pady=(2, 8))
+        if default_instructions:
+            instructions_box.insert("1.0", default_instructions)
+
+        att_row = ttk.Frame(form)
+        att_row.pack(anchor="w")
+        ttk.Label(att_row, text="Variations to generate:").pack(side=tk.LEFT, padx=(0, 8))
+        attempts_var = tk.StringVar(value=str(CONFIG["attempts"]))
+        ttk.Spinbox(att_row, textvariable=attempts_var, from_=1, to=8,
+                    width=5).pack(side=tk.LEFT)
+
+        back_dest = (self.step_dup_post_clamp if self.task == "duplicate"
+                     else self.step_color_picker)
+
+        def go():
+            instructions = instructions_box.get("1.0", tk.END).strip()
+            try:
+                attempts = int(attempts_var.get())
+                assert 1 <= attempts <= 8
+            except Exception:
+                messagebox.showerror("Invalid input", "Attempts must be 1–8.")
+                return
+            self.settings["special_requests"] = instructions
+            self.settings["attempts"] = attempts
+            # After generation + pick, the subsequent clamp routes normally
+            self._clamp_phase = "normal"
+            self.step5_generate()
+
+        self._nav_row(frame, back_cmd=back_dest,
+                      fwd_text="Generate →", fwd_cmd=go)
 
     # ── Step 2: Upload image ───────────────────────────────────────────────────
 
@@ -198,7 +667,8 @@ class App:
         info_var = tk.StringVar(value="No image selected.")
         ttk.Label(frame, textvariable=info_var, foreground="gray").pack()
 
-        next_btn = self._nav_row(frame, fwd_text="Next →", fwd_state="disabled")
+        next_btn = self._nav_row(frame, back_cmd=self.step_task_select,
+                                 fwd_text="Next →", fwd_state="disabled")
 
         def choose():
             path = filedialog.askopenfilename(
@@ -245,113 +715,14 @@ class App:
                   text=f"{self.processed_pil.width} × {self.processed_pil.height} px",
                   foreground="gray").pack()
 
+        def _fwd():
+            if self.task == "duplicate" or self.task == "fix_modify":
+                self.step_dup_check_suitability()
+            else:
+                self.step_color_picker()
+
         self._nav_row(frame, back_cmd=self.step2_upload_image,
-                      fwd_text="Confirm →", fwd_cmd=self.step4_settings)
-
-    # ── Step 4: Settings ───────────────────────────────────────────────────────
-
-    def step4_settings(self):
-        frame = self._new_frame()
-        self._header(frame, "Step 3 of 8 — Generation Settings")
-
-        form = ttk.Frame(frame, padding=(40, 0))
-        form.pack(fill=tk.X)
-
-        def field(label, default, cls=ttk.Entry, **kw):
-            r = ttk.Frame(form)
-            r.pack(fill=tk.X, pady=3)
-            ttk.Label(r, text=label, width=32, anchor="e").pack(side=tk.LEFT, padx=(0, 8))
-            var = tk.StringVar(value=str(default))
-            cls(r, textvariable=var, **kw).pack(side=tk.LEFT)
-            return var
-
-        width_var    = field("Output width (mm):",           CONFIG["width_mm"])
-        height_var   = field("Output height (mm):",          CONFIG["height_mm"])
-        thick_var    = field("Min feature thickness (mm):",  CONFIG["min_thickness_mm"])
-        attempts_var = field("Generation attempts (1–8):",   CONFIG["attempts"], ttk.Spinbox, from_=1, to=8, width=5)
-
-        # ── Dynamic color list ─────────────────────────────────────────────────
-        color_section = ttk.LabelFrame(form, text="Colors  (name or hex, e.g. 'black', '#c0392b')")
-        color_section.pack(fill=tk.X, pady=(10, 0))
-
-        color_rows: list[tuple[tk.StringVar, tk.Frame]] = []
-
-        def _refresh_swatch(swatch: tk.Label, var: tk.StringVar, *_):
-            from PIL import ImageColor
-            try:
-                r, g, b = ImageColor.getrgb(var.get().strip())[:3]
-                swatch.configure(bg=f"#{r:02x}{g:02x}{b:02x}")
-            except Exception:
-                swatch.configure(bg="#ffffff")
-
-        def add_color_row(name: str = ""):
-            if len(color_rows) >= 8:
-                return
-            row = ttk.Frame(color_section)
-            row.pack(fill=tk.X, padx=4, pady=2)
-            var = tk.StringVar(value=name)
-            ttk.Entry(row, textvariable=var, width=22).pack(side=tk.LEFT)
-            swatch = tk.Label(row, width=3, bg="#ffffff", relief="sunken")
-            swatch.pack(side=tk.LEFT, padx=4)
-            var.trace_add("write", lambda *_: _refresh_swatch(swatch, var))
-            _refresh_swatch(swatch, var)
-
-            def remove(r=row, v=var):
-                if len(color_rows) <= 1:
-                    return
-                r.destroy()
-                color_rows.remove(next(x for x in color_rows if x[0] is v))
-
-            ttk.Button(row, text="−", width=2, command=remove).pack(side=tk.LEFT)
-            color_rows.append((var, row))
-
-        for c in CONFIG["colors"]:
-            add_color_row(c)
-
-        ttk.Button(color_section, text="+ Add color",
-                   command=add_color_row).pack(anchor="w", padx=4, pady=(0, 4))
-
-        # ── Background color ───────────────────────────────────────────────────
-        bg_row = ttk.Frame(form)
-        bg_row.pack(fill=tk.X, pady=(10, 0))
-        ttk.Label(bg_row, text="Background color:", width=32, anchor="e").pack(side=tk.LEFT, padx=(0, 8))
-        bg_var = tk.StringVar(value=CONFIG["background_color"])
-        ttk.Entry(bg_row, textvariable=bg_var, width=22).pack(side=tk.LEFT)
-        bg_swatch = tk.Label(bg_row, width=3, bg="#ffffff", relief="sunken")
-        bg_swatch.pack(side=tk.LEFT, padx=4)
-        bg_var.trace_add("write", lambda *_: _refresh_swatch(bg_swatch, bg_var))
-        _refresh_swatch(bg_swatch, bg_var)
-
-        ttk.Label(form, text="Special requests (optional):").pack(anchor="w", pady=(10, 2))
-        requests_box = tk.Text(form, height=3, wrap=tk.WORD, width=52)
-        requests_box.pack(fill=tk.X)
-        if CONFIG["special_requests"]:
-            requests_box.insert("1.0", CONFIG["special_requests"])
-
-        def go():
-            try:
-                w = float(width_var.get())
-                h = float(height_var.get())
-                t = float(thick_var.get())
-                a = int(attempts_var.get())
-                assert w > 0 and h > 0 and t > 0 and 1 <= a <= 8
-            except Exception:
-                messagebox.showerror("Invalid input", "Please check all values are valid.")
-                return
-            colors = [v.get().strip() for v, _ in color_rows if v.get().strip()]
-            if not colors:
-                messagebox.showerror("Invalid input", "Add at least one color.")
-                return
-            self.settings = {
-                "width_mm": w, "height_mm": h, "min_thickness_mm": t,
-                "colors": colors, "attempts": a,
-                "background_color": bg_var.get().strip() or "white",
-                "special_requests": requests_box.get("1.0", tk.END).strip(),
-            }
-            self.step5_generate()
-
-        self._nav_row(frame, back_cmd=self.step3_confirm_image,
-                      fwd_text="Generate →", fwd_cmd=go)
+                      fwd_text="Confirm →", fwd_cmd=_fwd)
 
     # ── Step 5: Generate ───────────────────────────────────────────────────────
 
@@ -378,35 +749,16 @@ class App:
                        lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
         self.generated_images = []
-        colors = self.settings["colors"]
-        color_list = ", ".join(colors[:-1]) + f" and {colors[-1]}" if len(colors) > 1 else colors[0]
-        special = self.settings["special_requests"]
-        background_color = self.settings["background_color"]
-        prompt = CONFIG["prompt_template"].format(
-            colors=color_list, background_color=background_color)
-        if special:
-            prompt += f" {special}"
-
-        def generate_one() -> Image.Image:
-            payload = {
-                **CONFIG["generation_params"],
-                "prompt": prompt,
-                "width":  self.processed_pil.width,
-                "height": self.processed_pil.height,
-                "extra_images": [self.processed_b64],
-            }
-            r = requests.post(f"{CONFIG["api_base"]}/sdapi/v1/img2img", json=payload, timeout=300)
-            r.raise_for_status()
-            img = Image.open(io.BytesIO(base64.b64decode(r.json()["images"][0])))
-            img.load()
-            return img
+        prompt = self._build_prompt(self.settings["special_requests"])
+        src_b64 = self.processed_b64
+        src_w, src_h = self.processed_pil.width, self.processed_pil.height
 
         def run():
             for i in range(attempts):
                 self.root.after(0, lambda i=i: status_var.set(
                     f"Generating image {i + 1} of {attempts}…"))
                 try:
-                    img = generate_one()
+                    img = self._call_img2img(prompt, src_w, src_h, src_b64)
                     self.generated_images.append(img)
                     idx = len(self.generated_images) - 1
 
@@ -430,8 +782,11 @@ class App:
             if self.generated_images:
                 ttk.Button(frame, text="Pick an image →",
                            command=self.step6_pick_image).pack(pady=6)
+            settings_back = (self.step_dup_generate_settings
+                             if self.task in ("duplicate", "fix_modify")
+                             else self.step_color_picker)
             ttk.Button(frame, text="← Change settings",
-                       command=self.step4_settings).pack()
+                       command=settings_back).pack()
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -556,40 +911,20 @@ class App:
             bar.configure(maximum=attempts)
             bar["value"] = 0
 
-            colors = self.settings["colors"]
-            color_list = ", ".join(colors[:-1]) + f" and {colors[-1]}" if len(colors) > 1 else colors[0]
-            background_color = self.settings["background_color"]
-            base_prompt = CONFIG["prompt_template"].format(
-                colors=color_list, background_color=background_color)
-            prompt = f"{base_prompt} {instructions}"
-
+            prompt = self._build_prompt(instructions)
             buf = io.BytesIO()
             source_image.save(buf, format="PNG")
             src_b64 = base64.b64encode(buf.getvalue()).decode()
 
             new_images: list = []
 
-            def generate_one():
-                payload = {
-                    **CONFIG["generation_params"],
-                    "prompt": prompt,
-                    "width":  source_image.width,
-                    "height": source_image.height,
-                    "extra_images": [src_b64],
-                }
-                r = requests.post(f"{CONFIG['api_base']}/sdapi/v1/img2img",
-                                  json=payload, timeout=300)
-                r.raise_for_status()
-                img = Image.open(io.BytesIO(base64.b64decode(r.json()["images"][0])))
-                img.load()
-                return img
-
             def run():
                 for i in range(attempts):
                     self.root.after(0, lambda i=i: status_var.set(
                         f"Generating variation {i + 1} of {attempts}…"))
                     try:
-                        img = generate_one()
+                        img = self._call_img2img(
+                            prompt, source_image.width, source_image.height, src_b64)
                         new_images.append(img)
                         self.root.after(0, lambda: bar.step(1))
                     except Exception as e:
@@ -696,8 +1031,19 @@ class App:
                 ph = self._photo(src, max_size=360)
                 ttk.Label(cell, image=ph).pack()
                 ttk.Label(cell, text=label).pack()
-            self._nav_row(frame, back_cmd=self.step6_pick_image,
-                          fwd_text="Vectorize →", fwd_cmd=self.step8_vectorize)
+            phase = self._clamp_phase
+            if phase == "first_dup":
+                self._nav_row(frame, back_cmd=self.step_color_picker,
+                              fwd_text="Review →", fwd_cmd=self.step_dup_post_clamp)
+            elif phase == "first_fix":
+                self._nav_row(frame, back_cmd=self.step_color_picker,
+                              fwd_text="Generate →", fwd_cmd=self.step_dup_generate_settings)
+            elif phase == "clamp_only":
+                self._nav_row(frame, back_cmd=self.step_color_picker,
+                              fwd_text="Vectorize →", fwd_cmd=self.step8_vectorize)
+            else:
+                self._nav_row(frame, back_cmd=self.step6_pick_image,
+                              fwd_text="Vectorize →", fwd_cmd=self.step8_vectorize)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -797,6 +1143,7 @@ class App:
             from thinchecker import process_svg as thin_process
 
             checked_svg = self.svg_string
+            self.root.after(0, lambda: status_var.set(f"Thin check skipped: {e}"))
             try:
                 with tempfile.NamedTemporaryFile(
                     suffix=".svg", delete=False, mode="w", encoding="utf-8"
@@ -836,6 +1183,7 @@ class App:
                         self.settings["height_mm"],
                         upscaled_image=self.upscaled_image,
                         color_layers=self.color_layers,
+                        vectorized_svg=self.svg_string,
                     )
                     self._reset_session()
 
@@ -901,12 +1249,14 @@ def _svg_preview(svg_string: str, output_size: int = 800) -> Image.Image | None:
 
 def _save_svg_layers(svg_string: str, base_path: str,
                      width_mm: float, height_mm: float,
-                     upscaled_image=None, color_layers=None):
+                     upscaled_image=None, color_layers=None,
+                     vectorized_svg: str | None = None):
     """
     Save:
-      • <name>.svg          — layered SVG with mm dimensions
-      • <name>_upscaled.png — pre-clamped upscaled generation
-      • <name>_<color>.png  — colored PNG per layer (color on background)
+      • <name>.svg            — thin-checked layered SVG with mm dimensions
+      • <name>_vectorized.svg — raw vectorized SVG before thin check
+      • <name>_upscaled.png  — pre-clamped upscaled generation
+      • <name>_<color>.png   — colored PNG per layer (color on background)
     """
     import numpy as np
     from lxml import etree
@@ -928,6 +1278,23 @@ def _save_svg_layers(svg_string: str, base_path: str,
     except Exception:
         base.write_text(svg_string, encoding="utf-8")
     saved.append(str(base))
+
+    # ── Raw vectorized SVG (pre-thin-check) ───────────────────────────────────
+    if vectorized_svg is not None:
+        vec_path = base.with_name(f"{base.stem}_vectorized.svg")
+        try:
+            root_v = etree.fromstring(vectorized_svg.encode())
+            vb_v = root_v.get("viewBox") or (
+                f"0 0 {root_v.get('width', '100')} {root_v.get('height', '100')}"
+            )
+            root_v.set("width",   f"{width_mm}mm")
+            root_v.set("height",  f"{height_mm}mm")
+            root_v.set("viewBox", vb_v)
+            vec_path.write_bytes(etree.tostring(root_v, pretty_print=True,
+                                                xml_declaration=True, encoding="UTF-8"))
+        except Exception:
+            vec_path.write_text(vectorized_svg, encoding="utf-8")
+        saved.append(str(vec_path))
 
     # ── Upscaled PNG ──────────────────────────────────────────────────────────
     if upscaled_image is not None:
